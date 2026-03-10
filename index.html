@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mi Jornada · Ahorro Laboral Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { 
+            font-family: 'Plus Jakarta Sans', sans-serif; 
+            background-color: #F1F5F9;
+        }
+        .animate-in { animation: fadeIn 0.3s ease-out; }
+        .slide-up { animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        
+        .glass-nav { 
+            background: rgba(15, 23, 42, 0.9); 
+            backdrop-filter: blur(12px); 
+            -webkit-backdrop-filter: blur(12px); 
+        }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .day-cell:active { transform: scale(0.95); }
+        
+        @media (min-width: 1024px) {
+            .main-container {
+                display: grid;
+                grid-template-columns: 350px 1fr;
+                gap: 2rem;
+                align-items: start;
+            }
+        }
+    </style>
+</head>
+<body class="text-slate-900 antialiased overflow-x-hidden">
+    <div id="app" class="min-h-screen w-full max-w-6xl mx-auto relative bg-[#F8FAFC] pb-32 md:pb-12 shadow-sm"></div>
+
+    <script>
+        (function() {
+            let state = {
+                gastos: [],
+                vista: 'panel',
+                descansos: [],
+                mesCalendario: new Date(),
+                fechaSeleccionadaStr: null,
+                calendarioGastoActivo: null,
+                confirmarEliminarId: null,
+                editandoId: null,
+                notificacion: null,
+                nuevoGasto: { nombre: '', montoTotal: '', fechaInicio: '', frecuencia: 'quincenal' },
+                inputPersonalizado: { id: null, monto: '' }
+            };
+
+            const APP_ID = 'mi_jornada_v15_pro';
+
+            const normalizarFecha = (fecha) => {
+                const d = new Date(fecha);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            };
+
+            const aStringFecha = (fecha) => {
+                const d = new Date(fecha);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            };
+
+            const formatearFechaCorta = (fechaStr) => {
+                if (!fechaStr) return '';
+                const d = new Date(fechaStr + "T00:00:00");
+                const meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+                return `${d.getDate()}/${meses[d.getMonth()]}/${String(d.getFullYear()).slice(-2)}`;
+            };
+
+            const obtenerInicioCicloActual = (gasto) => {
+                const fin = obtenerVencimientoCercano(gasto);
+                if (!fin) return null;
+                const inicio = new Date(fin);
+                if (gasto.frecuencia === 'quincenal') inicio.setDate(inicio.getDate() - 15);
+                else if (gasto.frecuencia === 'mensual') inicio.setMonth(inicio.getMonth() - 1);
+                return inicio;
+            };
+
+            const obtenerVencimientoCercano = (gasto) => {
+                if (!gasto.fechaInicio) return null;
+                const hoy = normalizarFecha(new Date());
+                let prox = normalizarFecha(gasto.fechaInicio + "T00:00:00");
+                if (gasto.frecuencia === 'unico') return prox;
+                let intentos = 0;
+                while (prox < hoy && intentos < 500) {
+                    if (gasto.frecuencia === 'quincenal') prox.setDate(prox.getDate() + 15);
+                    else if (gasto.frecuencia === 'mensual') prox.setMonth(prox.getMonth() + 1);
+                    intentos++;
+                }
+                return prox;
+            };
+
+            const estaPagadoEnCiclo = (gasto, fecha) => {
+                const f = new Date(fecha);
+                const idCiclo = `${f.getFullYear()}-${f.getMonth()}`;
+                return gasto.historialPagos && gasto.historialPagos.includes(idCiclo);
+            };
+
+            const diasLaboralesEnCiclo = (gasto) => {
+                if (gasto.frecuencia === 'unico') return 1;
+                const fin = obtenerVencimientoCercano(gasto);
+                const inicio = obtenerInicioCicloActual(gasto);
+                let count = 0;
+                let temp = new Date(inicio);
+                while (temp < fin) {
+                    if (!state.descansos.includes(aStringFecha(temp))) count++;
+                    temp.setDate(temp.getDate() + 1);
+                }
+                return count || 1; 
+            };
+
+            const ahorroPorDia = (gasto) => {
+                const prox = obtenerVencimientoCercano(gasto);
+                const hoy = normalizarFecha(new Date());
+                if (estaPagadoEnCiclo(gasto, prox)) return 0;
+                if (!prox || (prox <= hoy && (gasto.ahorrado >= gasto.montoTotal))) return 0;
+                const diasRestantes = obtenerDiasLaboralesEntre(hoy, prox);
+                const pendiente = Math.max(0, gasto.montoTotal - (gasto.ahorrado || 0));
+                return diasRestantes > 0 ? pendiente / diasRestantes : 0;
+            };
+
+            const calcularDiasCubiertosPorAhorro = (gasto) => {
+                const costoDiaBase = (gasto.montoTotal || 0) / diasLaboralesEnCiclo(gasto);
+                if (costoDiaBase <= 0 || (gasto.ahorrado || 0) <= 0) return 0;
+                return Math.floor(gasto.ahorrado / costoDiaBase);
+            };
+
+            const gastoEnFecha = (fecha, gasto) => {
+                const f = normalizarFecha(fecha);
+                const inicio = normalizarFecha(gasto.fechaInicio + "T00:00:00");
+                if (f.getTime() === inicio.getTime()) return true;
+                if (gasto.frecuencia === 'unico') return false;
+                let iter = new Date(inicio);
+                let intentos = 0;
+                while (iter <= f && intentos < 500) {
+                    if (iter.getTime() === f.getTime()) return true;
+                    if (gasto.frecuencia === 'quincenal') iter.setDate(iter.getDate() + 15);
+                    else if (gasto.frecuencia === 'mensual') iter.setMonth(iter.getMonth() + 1);
+                    intentos++;
+                }
+                return false;
+            };
+
+            const obtenerDiasLaboralesEntre = (inicio, fin) => {
+                let count = 0;
+                let temp = new Date(inicio);
+                while (temp < fin) {
+                    if (!state.descansos.includes(aStringFecha(temp))) count++;
+                    temp.setDate(temp.getDate() + 1);
+                }
+                return Math.max(0, count);
+            };
+
+            const guardar = () => localStorage.setItem(APP_ID, JSON.stringify({ gastos: state.gastos, descansos: state.descansos }));
+            const cargar = () => {
+                const d = JSON.parse(localStorage.getItem(APP_ID) || '{}');
+                state.gastos = d.gastos || [];
+                state.descansos = d.descansos || [];
+            };
+
+            const setState = (n) => { Object.assign(state, n); guardar(); render(); };
+
+            const render = () => {
+                const app = document.getElementById('app');
+                app.innerHTML = `
+                    ${renderHeader()}
+                    <div class="px-4 md:px-8 max-w-6xl mx-auto">
+                        ${state.notificacion ? renderToast() : ''}
+                        <main class="animate-in mt-6">${renderContenido()}</main>
+                    </div>
+                    ${renderModales()}
+                    ${renderNav()}
+                `;
+                lucide.createIcons();
+            };
+
+            const renderHeader = () => {
+                const total = state.gastos.reduce((a, g) => a + ahorroPorDia(g), 0);
+                return `
+                    <header class="bg-indigo-700 p-6 md:p-12 pt-12 md:rounded-b-[4rem] text-white shadow-xl relative z-10 overflow-hidden">
+                        <div class="absolute top-[-50px] right-[-50px] w-64 h-64 bg-indigo-600 rounded-full opacity-20 hidden md:block"></div>
+                        <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6 relative">
+                            <div class="text-center md:text-left w-full md:w-auto">
+                                <h1 class="text-2xl md:text-3xl font-black tracking-tighter flex items-center justify-center md:justify-start gap-3">
+                                    <i data-lucide="coffee" class="text-indigo-300"></i> MI JORNADA
+                                </h1>
+                                <p class="text-indigo-200 text-[10px] md:text-xs font-bold uppercase tracking-[0.2em] mt-1">Ahorro Laboral Inteligente</p>
+                            </div>
+                            <div class="bg-white p-4 md:p-6 rounded-[2rem] md:rounded-[2.5rem] flex items-center justify-between shadow-2xl w-full md:w-auto md:min-w-[320px]">
+                                <div>
+                                    <p class="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Cuota Diaria Total</p>
+                                    <p class="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter">$${total.toFixed(2)}</p>
+                                </div>
+                                <div class="bg-indigo-50 p-3 md:p-4 rounded-2xl text-indigo-600 ml-4"><i data-lucide="zap"></i></div>
+                            </div>
+                        </div>
+                    </header>
+                `;
+            };
+
+            const renderContenido = () => {
+                if (state.vista === 'panel') return renderPanel();
+                if (state.vista === 'agenda') return renderAgenda();
+                return renderBalance();
+            };
+
+            const renderPanel = () => {
+                const gastosOrdenados = [...state.gastos].sort((a, b) => {
+                    const vA = obtenerVencimientoCercano(a);
+                    const vB = obtenerVencimientoCercano(b);
+                    if (!vA) return 1;
+                    if (!vB) return -1;
+                    return vA - vB;
+                });
+
+                return `
+                    <div class="flex flex-col lg:flex-row gap-8 pb-10">
+                        <div class="lg:w-1/3">
+                            <div class="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm sticky top-6">
+                                <h2 class="text-[10px] font-black uppercase text-slate-400 mb-6 flex items-center gap-2">
+                                    <i data-lucide="plus-circle" width="14"></i> ${state.editandoId ? 'Editar Plan' : 'Nuevo Compromiso'}
+                                </h2>
+                                <form id="fGasto" class="space-y-4">
+                                    <div class="space-y-1">
+                                        <label class="text-[9px] font-black text-slate-400 uppercase ml-2">Concepto</label>
+                                        <input type="text" id="nom" placeholder="¿Qué pagamos?" value="${state.nuevoGasto.nombre}" class="w-full p-4 bg-slate-50 rounded-2xl text-sm font-bold outline-none border-2 border-transparent focus:border-indigo-200 transition-all">
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <div class="space-y-1">
+                                            <label class="text-[9px] font-black text-slate-400 uppercase ml-2">Monto Total</label>
+                                            <input type="number" id="mon" placeholder="Total $" value="${state.nuevoGasto.montoTotal}" class="w-full p-4 bg-slate-50 rounded-2xl text-sm font-black outline-none border-2 border-transparent focus:border-indigo-200 transition-all">
+                                        </div>
+                                        <div class="space-y-1">
+                                            <label class="text-[9px] font-black text-slate-400 uppercase ml-2">Fecha Inicio</label>
+                                            <input type="date" id="fec" value="${state.nuevoGasto.fechaInicio}" class="w-full p-4 bg-slate-50 rounded-2xl text-xs font-bold text-slate-500 outline-none border-2 border-transparent focus:border-indigo-200 transition-all">
+                                        </div>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[9px] font-black text-slate-400 uppercase ml-2">Frecuencia de Pago</label>
+                                        <select id="fre" class="w-full p-4 bg-slate-50 rounded-2xl text-sm font-bold outline-none border-2 border-transparent focus:border-indigo-200 appearance-none">
+                                            <option value="quincenal" ${state.nuevoGasto.frecuencia==='quincenal'?'selected':''}>Quincenal (15 días)</option>
+                                            <option value="mensual" ${state.nuevoGasto.frecuencia==='mensual'?'selected':''}>Mensual (30 días)</option>
+                                            <option value="unico" ${state.nuevoGasto.frecuencia==='unico'?'selected':''}>Pago Único</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-indigo-100 transition-all active:scale-95">
+                                        ${state.editandoId ? 'Actualizar Compromiso' : 'Guardar Nuevo Plan'}
+                                    </button>
+                                    ${state.editandoId ? `
+                                        <button type="button" onclick="window.setState({editandoId:null, nuevoGasto:{nombre:'',montoTotal:'',fechaInicio:'',frecuencia:'quincenal'}})" class="w-full bg-slate-100 text-slate-500 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest mt-2">Cancelar Edición</button>
+                                    ` : ''}
+                                </form>
+                            </div>
+                        </div>
+
+                        <div class="lg:w-2/3">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                ${gastosOrdenados.length ? gastosOrdenados.map(g => renderGasto(g)).join('') : `
+                                    <div class="col-span-full bg-white p-12 rounded-[2.5rem] border border-dashed border-slate-200 text-center">
+                                        <i data-lucide="info" class="text-slate-300 mx-auto mb-4" width="40"></i>
+                                        <p class="text-slate-400 font-bold text-sm">No hay compromisos activos.<br>Comienza agregando uno a la izquierda.</p>
+                                    </div>
+                                `}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            };
+
+            const renderGasto = (g) => {
+                const prox = obtenerVencimientoCercano(g);
+                const pagadoEsteCiclo = estaPagadoEnCiclo(g, prox);
+                const cuota = ahorroPorDia(g);
+                const cubiertos = calcularDiasCubiertosPorAhorro(g);
+                const hoy = normalizarFecha(new Date());
+                const diasParaPago = prox ? Math.max(0, Math.ceil((prox - hoy) / 86400000)) : 0;
+                const totalDias = diasLaboralesEnCiclo(g);
+                const faltantes = Math.max(0, totalDias - cubiertos);
+                const prog = Math.min(100, (g.ahorrado / g.montoTotal) * 100);
+                const montoPendiente = Math.max(0, g.montoTotal - (g.ahorrado || 0));
+                
+                return `
+                    <div class="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm relative overflow-hidden transition-all hover:shadow-md ${pagadoEsteCiclo ? 'opacity-80' : ''}">
+                        <div class="flex justify-between items-start mb-5">
+                            <div>
+                                <h3 class="font-black text-slate-800 text-lg uppercase tracking-tighter flex items-center gap-2">
+                                    ${g.nombre}
+                                    ${pagadoEsteCiclo ? '<i data-lucide="check-circle-2" class="text-emerald-500" width="18"></i>' : ''}
+                                </h3>
+                                <div class="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                                    <p class="text-[9px] font-black text-indigo-500 uppercase flex items-center gap-1"><i data-lucide="calendar" width="10"></i> ${formatearFechaCorta(aStringFecha(prox))}</p>
+                                    <p class="text-[9px] font-black ${diasParaPago <= 3 ? 'text-red-500' : 'text-amber-500'} uppercase flex items-center gap-1"><i data-lucide="clock" width="10"></i> Faltan: ${diasParaPago} días</p>
+                                </div>
+                            </div>
+                            <div class="flex gap-1">
+                                <button onclick="window.edit(${g.id})" class="p-2 text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"><i data-lucide="edit-2" width="16"></i></button>
+                                <button onclick="window.confirmarDel(${g.id})" class="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><i data-lucide="trash-2" width="16"></i></button>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-slate-50 p-4 rounded-3xl mb-4 flex justify-between items-center">
+                            <div>
+                                <p class="text-[8px] font-black text-slate-400 uppercase mb-0.5">${pagadoEsteCiclo ? 'Ciclo Actual Cubierto' : 'Aporte Diario'}</p>
+                                <p class="text-2xl font-black text-slate-900">${pagadoEsteCiclo ? 'PAGADO' : '$'+cuota.toFixed(2)}</p>
+                            </div>
+                            <button onclick="window.verCal(${g.id})" class="bg-white p-3 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-2 active:scale-95 transition-all hover:border-indigo-300">
+                                <span class="text-[10px] font-black text-indigo-600 uppercase">Cobertura</span>
+                                <i data-lucide="calendar-range" class="text-indigo-600" width="16"></i>
+                            </button>
+                        </div>
+
+                        ${!pagadoEsteCiclo ? `
+                            <div class="grid grid-cols-2 gap-3 mb-4">
+                                <div class="bg-indigo-50/50 p-3 rounded-2xl border border-indigo-100/30">
+                                    <p class="text-[8px] font-black text-indigo-400 uppercase">Cubiertos</p>
+                                    <p class="text-xs font-black text-indigo-700">${cubiertos} días</p>
+                                </div>
+                                <div class="bg-emerald-50/50 p-3 rounded-2xl border border-emerald-100/30 text-right">
+                                    <p class="text-[8px] font-black text-emerald-400 uppercase">Faltantes</p>
+                                    <p class="text-xs font-black text-emerald-700">${faltantes} días</p>
+                                </div>
+                            </div>
+
+                            <div class="flex flex-wrap gap-2 mb-4">
+                                ${[20, 50, 100].map(m => `<button onclick="window.dep(${g.id},${m})" class="flex-1 py-3 bg-white border border-slate-100 rounded-xl font-black text-slate-600 text-[10px] active:bg-indigo-50 hover:bg-slate-50 transition-all">+$${m}</button>`).join('')}
+                                <button onclick="window.otro(${g.id})" class="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-black text-[9px] uppercase hover:bg-indigo-700 shadow-md shadow-indigo-100 transition-all">Más</button>
+                            </div>
+
+                            ${state.inputPersonalizado.id === g.id ? `
+                                <div class="flex gap-2 mb-4 animate-in slide-up">
+                                    <input type="number" id="inP" class="flex-1 p-3 bg-slate-100 rounded-xl text-sm font-black outline-none border-2 border-indigo-200" placeholder="Monto">
+                                    <button onclick="window.confO(${g.id})" class="bg-slate-900 text-white px-5 rounded-xl font-black text-[10px] uppercase transition-all active:scale-95">Abonar</button>
+                                </div>
+                            ` : ''}
+
+                            <div class="space-y-2 mt-2">
+                                <div class="flex justify-between text-[9px] font-black uppercase px-1">
+                                    <span class="text-indigo-600">Ahorrado: $${g.ahorrado.toFixed(0)}</span>
+                                    <span class="text-red-500">Resta: $${montoPendiente.toFixed(0)}</span>
+                                </div>
+                                <div class="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                                    <div class="h-full bg-indigo-500 transition-all duration-700 ease-out" style="width: ${prog}%"></div>
+                                </div>
+                            </div>
+                        ` : `
+                            <div class="bg-emerald-50 p-6 rounded-[2rem] border border-emerald-100 flex items-center justify-center gap-4">
+                                <div class="bg-emerald-500 p-3 rounded-full text-white"><i data-lucide="check" width="20"></i></div>
+                                <div>
+                                    <p class="text-xs font-black text-emerald-700 uppercase tracking-widest leading-none mb-1">Objetivo Cumplido</p>
+                                    <p class="text-[9px] font-bold text-emerald-500 uppercase">Ciclo vence el ${prox ? prox.toLocaleDateString() : '---'}</p>
+                                </div>
+                            </div>
+                        `}
+                    </div>
+                `;
+            };
+
+            const renderAgenda = () => {
+                const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+                const año = state.mesCalendario.getFullYear();
+                const mes = state.mesCalendario.getMonth();
+                const primerDia = new Date(año, mes, 1).getDay();
+                const diasMes = new Date(año, mes + 1, 0).getDate();
+                
+                const dias = [];
+                for(let i=0; i<primerDia; i++) dias.push(`<div class="h-16 md:h-24 opacity-0 pointer-events-none"></div>`);
+                for(let d=1; d<=diasMes; d++) {
+                    const fStr = `${año}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                    const fObj = new Date(fStr + "T00:00:00");
+                    const esDescanso = state.descansos.includes(fStr);
+                    const planesHoy = state.gastos.filter(g => gastoEnFecha(fObj, g));
+                    const tienePago = planesHoy.length > 0;
+                    const todosPagados = tienePago && planesHoy.every(g => estaPagadoEnCiclo(g, fObj) || (g.ahorrado >= g.montoTotal));
+                    const esSeleccionado = state.fechaSeleccionadaStr === fStr;
+                    
+                    dias.push(`
+                        <div onclick="window.diaDetalle('${fStr}')" class="day-cell h-16 md:h-24 rounded-2xl md:rounded-[2rem] flex flex-col items-center justify-center relative cursor-pointer transition-all border group ${esDescanso ? 'bg-amber-50/50 border-amber-100 text-amber-700' : 'bg-white border-slate-100 text-slate-600 hover:border-indigo-200'} ${esSeleccionado ? 'ring-4 ring-indigo-500/20 border-indigo-500 z-10' : ''}">
+                            <span class="text-xs md:text-sm font-black">${d}</span>
+                            <button onclick="event.stopPropagation(); window.togD('${fStr}')" class="absolute top-1 md:top-2 right-1 md:right-2 p-1.5 rounded-lg transition-all ${esDescanso ? 'bg-amber-500 text-white' : 'text-slate-200 hover:text-amber-500 hover:bg-amber-50'}">
+                                <i data-lucide="coffee" width="10" height="10" class="md:w-3 md:h-3"></i>
+                            </button>
+                            ${tienePago ? `
+                                <div class="absolute bottom-2 md:bottom-4 ${todosPagados ? 'text-emerald-500' : 'text-amber-500 animate-pulse'}">
+                                    <i data-lucide="${todosPagados ? 'check-circle-2' : 'banknote'}" width="14" height="14" class="md:w-5 md:h-5"></i>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `);
+                }
+
+                return `
+                    <div class="flex flex-col xl:flex-row gap-8 pb-20">
+                        <div class="xl:w-2/3">
+                            <div class="flex justify-between items-center bg-white p-4 rounded-[2rem] shadow-sm mb-6">
+                                <button onclick="window.cMes(-1)" class="p-3 text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all"><i data-lucide="chevron-left"></i></button>
+                                <span class="font-black text-base uppercase tracking-widest text-slate-800">${meses[mes]} ${año}</span>
+                                <button onclick="window.cMes(1)" class="p-3 text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all"><i data-lucide="chevron-right"></i></button>
+                            </div>
+                            <div class="grid grid-cols-7 gap-2 md:gap-3 text-center">
+                                ${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].map(l => `<span class="text-[10px] md:text-xs font-black text-slate-300 p-2 uppercase">${l}</span>`).join('')}
+                                ${dias.join('')}
+                            </div>
+                        </div>
+                        <div class="xl:w-1/3 min-h-[400px]">
+                            ${state.fechaSeleccionadaStr ? renderDetalleDia() : `
+                                <div class="bg-white border border-dashed border-slate-200 rounded-[3rem] p-12 text-center h-full flex flex-col items-center justify-center opacity-60">
+                                    <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6">
+                                        <i data-lucide="mouse-pointer-2" class="text-slate-300" width="32"></i>
+                                    </div>
+                                    <p class="text-slate-400 font-bold text-sm uppercase tracking-wider leading-relaxed">Selecciona un día<br>para ver tus compromisos</p>
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                `;
+            };
+
+            const renderDetalleDia = () => {
+                const fStr = state.fechaSeleccionadaStr;
+                const fObj = new Date(fStr + "T00:00:00");
+                const pagosHoy = state.gastos.filter(g => gastoEnFecha(fObj, g));
+                const esDescanso = state.descansos.includes(fStr);
+                const hoy = normalizarFecha(new Date());
+
+                // Solo mostramos el detalle completo si hay pagos programados hoy.
+                if (pagosHoy.length === 0) {
+                    return `
+                        <div class="bg-white border border-dashed border-slate-200 rounded-[3rem] p-12 text-center h-full flex flex-col items-center justify-center opacity-60">
+                            <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6 text-slate-300">
+                                <i data-lucide="coffee" width="32"></i>
+                            </div>
+                            <p class="text-slate-400 font-bold text-sm uppercase tracking-wider leading-relaxed">Nada que pagar hoy.<br>¡Disfruta tu día!</p>
+                            <button onclick="window.setState({fechaSeleccionadaStr: null})" class="mt-8 px-6 py-3 bg-slate-100 hover:bg-slate-200 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all">Cerrar</button>
+                        </div>
+                    `;
+                }
+
+                return `
+                    <div class="bg-indigo-900 text-white p-8 rounded-[3rem] shadow-2xl animate-in slide-up h-full relative overflow-hidden">
+                        <div class="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-16 -mt-16"></div>
+                        
+                        <div class="flex justify-between items-start mb-8 relative z-10">
+                            <div>
+                                <h4 class="text-xl font-black uppercase tracking-tighter leading-tight">${fObj.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' })}</h4>
+                                <p class="text-[10px] md:text-xs font-bold text-indigo-300 uppercase tracking-widest mt-1">${esDescanso ? 'Día de descanso' : 'Día de labor'}</p>
+                            </div>
+                            <div class="bg-white/10 p-4 rounded-3xl backdrop-blur-sm">
+                                <i data-lucide="${esDescanso ? 'coffee' : 'briefcase'}" class="${esDescanso ? 'text-amber-400' : 'text-indigo-300'}" width="24"></i>
+                            </div>
+                        </div>
+                        
+                        <div class="space-y-4 relative z-10">
+                            <p class="text-[9px] font-black text-indigo-400 uppercase tracking-[0.2em]">Pagos Programados:</p>
+                            ${pagosHoy.map(g => {
+                                const prox = obtenerVencimientoCercano(g);
+                                const diffDiasReal = prox ? Math.max(0, Math.ceil((prox - hoy) / 86400000)) : 0;
+                                const estaPagado = estaPagadoEnCiclo(g, fObj) || (g.ahorrado >= g.montoTotal);
+                                const prog = estaPagado ? 100 : Math.min(100, (g.ahorrado / g.montoTotal) * 100);
+                                const metaRestante = Math.max(0, g.montoTotal - (g.ahorrado || 0));
+
+                                return `
+                                <div class="bg-white/10 p-6 rounded-[2.5rem] border border-white/5 space-y-4 transition-all ${estaPagado ? 'border-emerald-500/30' : 'hover:bg-white/[0.15]'}">
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <span class="font-black text-base block uppercase tracking-tight flex items-center gap-2">
+                                                ${g.nombre}
+                                                ${estaPagado ? '<i data-lucide="check-circle-2" class="text-emerald-400" width="16"></i>' : ''}
+                                            </span>
+                                            <span class="text-[9px] font-bold ${estaPagado ? 'text-emerald-400' : (diffDiasReal < 3 ? 'text-amber-400' : 'text-indigo-300')} uppercase">
+                                                ${estaPagado ? 'CICLO CERRADO' : (diffDiasReal === 0 ? 'VENCE HOY' : `Faltan ${diffDiasReal} días`)}
+                                            </span>
+                                        </div>
+                                        <span class="text-emerald-400 font-black text-xl">$${g.montoTotal}</span>
+                                    </div>
+                                    
+                                    <div class="bg-indigo-950/40 p-4 rounded-2xl grid grid-cols-2 gap-4">
+                                        <div>
+                                            <p class="text-[8px] font-black text-indigo-400 uppercase">Ahorrado</p>
+                                            <p class="text-sm font-black text-white">$${g.ahorrado.toFixed(0)}</p>
+                                        </div>
+                                        <div class="text-right">
+                                            <p class="text-[8px] font-black text-indigo-400 uppercase">Meta Restante</p>
+                                            <p class="text-sm font-black text-indigo-200">$${metaRestante.toFixed(0)}</p>
+                                        </div>
+                                    </div>
+
+                                    <button onclick="window.marcarPagado(${g.id}, '${fStr}')" class="w-full py-4 ${estaPagado ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-white/20 hover:bg-white/30'} rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95">
+                                        <i data-lucide="${estaPagado ? 'rotate-ccw' : 'check'}" width="16" class="text-white"></i>
+                                        <span class="text-[11px] font-black uppercase tracking-widest">${estaPagado ? 'Reiniciar Ciclo' : 'Completar Pago'}</span>
+                                    </button>
+
+                                    <div class="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                                        <div class="h-full bg-emerald-400 transition-all duration-1000" style="width: ${prog}%"></div>
+                                    </div>
+                                </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        <button onclick="window.setState({fechaSeleccionadaStr: null})" class="mt-8 w-full py-4 bg-white/5 hover:bg-white/10 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all relative z-10">Cerrar Detalles</button>
+                    </div>
+                `;
+            };
+
+            const renderBalance = () => {
+                const tot = state.gastos.reduce((a, g) => a + (g.ahorrado || 0), 0);
+                const meta = state.gastos.reduce((a, g) => a + g.montoTotal, 0);
+                const pendiente = Math.max(0, meta - tot);
+                const pct = meta > 0 ? (tot / meta) * 100 : 0;
+
+                return `
+                    <div class="p-4 md:p-8 flex flex-col items-center">
+                        <div class="w-full max-w-2xl bg-slate-900 text-white p-8 md:p-12 rounded-[3.5rem] shadow-2xl relative overflow-hidden">
+                            <div class="absolute top-0 right-0 w-48 h-48 bg-indigo-500/10 rounded-full -mr-24 -mt-24 blur-3xl"></div>
+                            <p class="text-[11px] font-black text-slate-500 uppercase tracking-[0.3em] mb-4">Balance General</p>
+                            <h2 class="text-5xl md:text-7xl font-black mb-10 tracking-tighter">$${pendiente.toFixed(0)} <span class="text-2xl text-slate-700 font-bold">Resta</span></h2>
+                            <div class="grid grid-cols-2 gap-6 mb-10">
+                                <div class="bg-white/5 p-6 rounded-3xl border border-white/5">
+                                    <p class="text-[9px] font-black text-slate-500 uppercase mb-1">Total Metas</p>
+                                    <p class="text-xl font-black text-white">$${meta.toFixed(0)}</p>
+                                </div>
+                                <div class="bg-indigo-500/10 p-6 rounded-3xl border border-indigo-500/20">
+                                    <p class="text-[9px] font-black text-indigo-400 uppercase mb-1">Total Ahorrado</p>
+                                    <p class="text-xl font-black text-indigo-300">$${tot.toFixed(0)}</p>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div class="flex justify-between items-end">
+                                    <p class="text-xs font-black uppercase tracking-widest text-indigo-400">Progreso Global</p>
+                                    <p class="text-3xl font-black text-white">${pct.toFixed(1)}%</p>
+                                </div>
+                                <div class="h-4 w-full bg-white/5 rounded-full overflow-hidden p-1 border border-white/5">
+                                    <div class="h-full bg-gradient-to-r from-indigo-600 to-indigo-400 rounded-full transition-all duration-1000 shadow-[0_0_15px_rgba(99,102,241,0.5)]" style="width: ${pct}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            };
+
+            const renderModales = () => {
+                let modalHTML = '';
+                if (state.calendarioGastoActivo) {
+                    const g = state.calendarioGastoActivo;
+                    const cubiertos = calcularDiasCubiertosPorAhorro(g);
+                    const proxPago = obtenerVencimientoCercano(g);
+                    const inicioCiclo = obtenerInicioCicloActual(g);
+                    const año = state.mesCalendario.getFullYear();
+                    const mes = state.mesCalendario.getMonth();
+                    const diasMes = new Date(año, mes + 1, 0).getDate();
+                    const primerDia = new Date(año, mes, 1).getDay();
+                    const marcasVerdes = [];
+                    
+                    if (cubiertos > 0 && inicioCiclo) {
+                        let temp = new Date(inicioCiclo);
+                        temp.setDate(temp.getDate() + 1);
+                        let aportesCubiertos = 0;
+                        let limitador = 0;
+                        while (aportesCubiertos < cubiertos && limitador < 365) { 
+                            const fs = aStringFecha(temp);
+                            if (!state.descansos.includes(fs)) {
+                                marcasVerdes.push(fs);
+                                aportesCubiertos++;
+                            }
+                            temp.setDate(temp.getDate() + 1);
+                            limitador++;
+                        }
+                    }
+
+                    const slots = [];
+                    for(let i=0; i<primerDia; i++) slots.push(`<div class="h-10 md:h-12"></div>`);
+                    for(let d=1; d<=diasMes; d++) {
+                        const fStr = `${año}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                        const esVerde = marcasVerdes.includes(fStr);
+                        const esPago = proxPago && aStringFecha(proxPago) === fStr;
+                        slots.push(`
+                            <div class="h-10 md:h-12 rounded-xl flex items-center justify-center text-xs font-bold relative transition-all
+                                ${esVerde ? 'bg-emerald-500 text-white shadow-md' : 'bg-slate-50 text-slate-400'}
+                                ${esPago ? 'ring-2 ring-indigo-600 bg-white scale-110 z-10' : ''}">
+                                ${d}
+                            </div>
+                        `);
+                    }
+
+                    modalHTML += `
+                        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] flex items-center justify-center p-4 animate-in">
+                            <div class="bg-white w-full max-w-lg rounded-[3rem] p-8 md:p-12 shadow-2xl slide-up">
+                                <div class="flex justify-between items-start mb-8">
+                                    <div>
+                                        <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest">${g.nombre}</span>
+                                        <h4 class="font-black text-slate-900 text-2xl tracking-tighter">Visualización de Aportes</h4>
+                                    </div>
+                                    <button onclick="window.clM()" class="p-3 bg-slate-100 hover:bg-slate-200 rounded-full transition-all"><i data-lucide="x" width="20"></i></button>
+                                </div>
+                                <div class="grid grid-cols-7 gap-2 mb-8 text-center">
+                                    ${['D','L','M','M','J','V','S'].map(l => `<span class="text-[9px] font-black text-slate-300 uppercase">${l}</span>`).join('')}
+                                    ${slots.join('')}
+                                </div>
+                                <div class="bg-slate-50 p-6 rounded-3xl mb-8 flex flex-col gap-3">
+                                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-emerald-500 rounded-md"></span><span class="text-[10px] font-bold text-slate-500 uppercase">Aportes acumulados</span></div>
+                                    <div class="flex items-center gap-3"><span class="w-4 h-4 ring-2 ring-indigo-600 bg-white rounded-md"></span><span class="text-[10px] font-bold text-indigo-600 uppercase">Fecha de vencimiento</span></div>
+                                </div>
+                                <button onclick="window.clM()" class="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all">Cerrar</button>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                if (state.confirmarEliminarId) {
+                    const g = state.gastos.find(x => x.id === state.confirmarEliminarId);
+                    modalHTML += `
+                        <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] flex items-center justify-center p-6 animate-in">
+                            <div class="bg-white w-full max-w-sm rounded-[3rem] p-10 shadow-2xl text-center slide-up">
+                                <div class="bg-red-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 text-red-500"><i data-lucide="alert-triangle" width="32"></i></div>
+                                <h4 class="text-xl font-black text-slate-900 mb-2 uppercase tracking-tighter">¿Eliminar Plan?</h4>
+                                <p class="text-sm text-slate-500 mb-10 px-4">Esta acción no se puede deshacer.</p>
+                                <div class="flex flex-col gap-3">
+                                    <button onclick="window.del(${g.id})" class="w-full bg-red-500 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest">Borrar</button>
+                                    <button onclick="window.cancelarDel()" class="w-full bg-slate-100 text-slate-600 py-4 rounded-2xl font-black text-xs uppercase tracking-widest">Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                return modalHTML;
+            };
+
+            const renderNav = () => `
+                <nav class="fixed bottom-6 left-1/2 -translate-x-1/2 w-[92%] max-w-md glass-nav rounded-[2.5rem] p-2 flex justify-between items-center z-50 border border-white/10 shadow-2xl">
+                    <button onclick="window.nav('panel')" class="flex-1 py-3 md:py-4 rounded-[2rem] flex flex-col items-center gap-1.5 transition-all ${state.vista==='panel'?'bg-indigo-600 text-white shadow-lg':'text-slate-500'}">
+                        <i data-lucide="layout" width="20"></i><span class="text-[9px] font-black uppercase">Panel</span>
+                    </button>
+                    <button onclick="window.nav('agenda')" class="flex-1 py-3 md:py-4 rounded-[2rem] flex flex-col items-center gap-1.5 transition-all ${state.vista==='agenda'?'bg-indigo-600 text-white shadow-lg':'text-slate-500'}">
+                        <i data-lucide="calendar" width="20"></i><span class="text-[9px] font-black uppercase">Agenda</span>
+                    </button>
+                    <button onclick="window.nav('metas')" class="flex-1 py-3 md:py-4 rounded-[2rem] flex flex-col items-center gap-1.5 transition-all ${state.vista==='metas'?'bg-indigo-600 text-white shadow-lg':'text-slate-500'}">
+                        <i data-lucide="bar-chart" width="20"></i><span class="text-[9px] font-black uppercase">Balance</span>
+                    </button>
+                </nav>
+            `;
+
+            const renderToast = () => `
+                <div class="fixed top-6 left-1/2 -translate-x-1/2 z-[300] bg-slate-900 text-white px-8 py-5 rounded-[2rem] shadow-2xl flex items-center gap-4 slide-up">
+                    <i data-lucide="check-circle" class="text-indigo-400" width="20"></i><span class="text-xs font-black uppercase tracking-widest">${state.notificacion}</span>
+                </div>
+            `;
+
+            const toast = (m) => { state.notificacion = m; render(); setTimeout(() => { state.notificacion = null; render(); }, 2000); };
+
+            window.nav = (v) => setState({ vista: v, fechaSeleccionadaStr: null });
+            window.diaDetalle = (f) => setState({ fechaSeleccionadaStr: f });
+            window.togD = (f) => {
+                const n = state.descansos.includes(f) ? state.descansos.filter(d=>d!==f) : [...state.descansos, f];
+                setState({ descansos: n });
+            };
+            window.cMes = (n) => { const d = new Date(state.mesCalendario); d.setMonth(d.getMonth()+n); setState({ mesCalendario: d }); };
+            window.dep = (id, m) => {
+                const ns = state.gastos.map(g => g.id === id ? {...g, ahorrado: Math.min(g.montoTotal, (g.ahorrado || 0) + m)} : g);
+                setState({ gastos: ns }); toast(`Abono de $${m} realizado`);
+            };
+            window.otro = (id) => setState({ inputPersonalizado: { id, monto: '' } });
+            window.confO = (id) => {
+                const val = parseFloat(document.getElementById('inP').value);
+                if(val > 0) window.dep(id, val);
+                setState({ inputPersonalizado: { id: null, monto: '' } });
+            };
+            window.edit = (id) => {
+                const g = state.gastos.find(x=>x.id===id);
+                setState({ editandoId: id, nuevoGasto: {...g}, vista: 'panel' });
+            };
+            window.marcarPagado = (id, fechaActualStr) => {
+                const f = new Date(fechaActualStr + "T00:00:00");
+                const idCiclo = `${f.getFullYear()}-${f.getMonth()}`;
+                const nuevosGastos = state.gastos.map(g => {
+                    if (g.id === id) {
+                        const historial = g.historialPagos || [];
+                        const yaPagado = historial.includes(idCiclo);
+                        let nuevaFechaInicio = g.fechaInicio;
+                        if (!yaPagado) {
+                            const d = new Date(g.fechaInicio + "T00:00:00");
+                            if (g.frecuencia === 'quincenal') d.setDate(d.getDate() + 15);
+                            else if (g.frecuencia === 'mensual') d.setMonth(d.getMonth() + 1);
+                            nuevaFechaInicio = aStringFecha(d);
+                        }
+                        return { ...g, ahorrado: 0, fechaInicio: nuevaFechaInicio, historialPagos: yaPagado ? historial.filter(h => h !== idCiclo) : [...historial, idCiclo] };
+                    }
+                    return g;
+                });
+                setState({ gastos: nuevosGastos });
+                toast("Ciclo actualizado.");
+            };
+            window.confirmarDel = (id) => setState({ confirmarEliminarId: id });
+            window.cancelarDel = () => setState({ confirmarEliminarId: null });
+            window.del = (id) => { setState({ gastos: state.gastos.filter(g=>g.id!==id), confirmarEliminarId: null }); toast("Plan eliminado."); };
+            window.verCal = (id) => setState({ calendarioGastoActivo: state.gastos.find(x=>x.id===id) });
+            window.clM = () => setState({ calendarioGastoActivo: null });
+
+            document.addEventListener('submit', (e) => {
+                if(e.target.id === 'fGasto') {
+                    e.preventDefault();
+                    const n = document.getElementById('nom').value;
+                    const m = parseFloat(document.getElementById('mon').value);
+                    const f = document.getElementById('fec').value;
+                    const fr = document.getElementById('fre').value;
+                    if(!n || isNaN(m) || !f) return toast("Campos incompletos");
+                    if(state.editandoId) {
+                        const ns = state.gastos.map(g => g.id === state.editandoId ? {...g, nombre:n, montoTotal:m, fechaInicio:f, frecuencia:fr} : g);
+                        setState({ gastos: ns, editandoId: null, nuevoGasto: {nombre:'', montoTotal:'', fechaInicio:'', frecuencia:'quincenal'} });
+                        toast("Actualizado");
+                    } else {
+                        const ng = { id: Date.now(), nombre: n, montoTotal: m, fechaInicio: f, frecuencia: fr, ahorrado: 0, historialPagos: [] };
+                        setState({ gastos: [...state.gastos, ng], nuevoGasto: {nombre:'', montoTotal:'', fechaInicio:'', frecuencia:'quincenal'} });
+                        toast("Guardado");
+                    }
+                }
+            });
+
+            cargar(); render();
+        })();
+    </script>
+</body>
+</html>

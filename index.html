@@ -39,7 +39,6 @@
             }
         }
 
-        /* Estilos para el colapsable */
         .form-collapse {
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             max-height: 0;
@@ -71,12 +70,11 @@
                 nuevoGasto: { nombre: '', montoTotal: '', fechaInicio: '', frecuencia: 'quincenal' },
                 inputPersonalizado: { id: null, monto: '' },
                 editandoAhorroId: null,
-                mostrarFormulario: false // Nuevo estado para el menú colapsable
+                mostrarFormulario: false 
             };
 
             const APP_ID = 'mi_jornada_v15_pro';
 
-            // FUNCIÓN PARA SEPARADOR DE MILLARES
             const fM = (num, decimals = 2) => {
                 return Number(num).toLocaleString('es-MX', {
                     minimumFractionDigits: decimals,
@@ -102,15 +100,6 @@
                 return `${d.getDate()}/${meses[d.getMonth()]}/${String(d.getFullYear()).slice(-2)}`;
             };
 
-            const obtenerInicioCicloActual = (gasto) => {
-                const fin = obtenerVencimientoCercano(gasto);
-                if (!fin) return null;
-                const inicio = new Date(fin);
-                if (gasto.frecuencia === 'quincenal') inicio.setDate(inicio.getDate() - 15);
-                else if (gasto.frecuencia === 'mensual') inicio.setMonth(inicio.getMonth() - 1);
-                return inicio;
-            };
-
             const obtenerVencimientoCercano = (gasto) => {
                 if (!gasto.fechaInicio) return null;
                 const hoy = normalizarFecha(new Date());
@@ -125,37 +114,61 @@
                 return prox;
             };
 
+            const obtenerInicioCicloActual = (gasto) => {
+                const fin = obtenerVencimientoCercano(gasto);
+                if (!fin) return null;
+                const inicio = new Date(fin);
+                if (gasto.frecuencia === 'quincenal') inicio.setDate(inicio.getDate() - 15);
+                else if (gasto.frecuencia === 'mensual') inicio.setMonth(inicio.getMonth() - 1);
+                else if (gasto.frecuencia === 'unico') return normalizarFecha(new Date());
+                return inicio;
+            };
+
             const estaPagadoEnCiclo = (gasto, fecha) => {
+                if (!fecha) return false;
                 const f = new Date(fecha);
-                const idCiclo = `${f.getFullYear()}-${f.getMonth()}`;
+                const idCiclo = `${f.getFullYear()}-${f.getMonth()}-${f.getDate()}`;
                 return gasto.historialPagos && gasto.historialPagos.includes(idCiclo);
             };
 
             const diasLaboralesEnCiclo = (gasto) => {
-                if (gasto.frecuencia === 'unico') return 1;
                 const fin = obtenerVencimientoCercano(gasto);
                 const inicio = obtenerInicioCicloActual(gasto);
+                if (!fin || !inicio) return 1;
+                return obtenerDiasLaboralesEntre(inicio, fin);
+            };
+
+            const obtenerDiasLaboralesEntre = (inicio, fin) => {
                 let count = 0;
                 let temp = new Date(inicio);
-                while (temp < fin) {
-                    if (!state.descansos.includes(aStringFecha(temp))) count++;
+                const end = new Date(fin);
+                while (temp <= end) {
+                    if (!state.descansos.includes(aStringFecha(temp))) {
+                        count++;
+                    }
                     temp.setDate(temp.getDate() + 1);
                 }
-                return count || 1; 
+                return Math.max(0, count);
             };
 
             const ahorroPorDia = (gasto) => {
                 const prox = obtenerVencimientoCercano(gasto);
+                if (!prox) return 0;
+                
                 const hoy = normalizarFecha(new Date());
                 if (estaPagadoEnCiclo(gasto, prox)) return 0;
-                if (!prox || (prox <= hoy && (gasto.ahorrado >= gasto.montoTotal))) return 0;
-                const diasRestantes = obtenerDiasLaboralesEntre(hoy, prox);
+                
                 const pendiente = Math.max(0, gasto.montoTotal - (gasto.ahorrado || 0));
-                return diasRestantes > 0 ? pendiente / diasRestantes : 0;
+                if (pendiente <= 0) return 0;
+
+                const diasRestantes = obtenerDiasLaboralesEntre(hoy, prox);
+                
+                return diasRestantes > 0 ? pendiente / diasRestantes : pendiente;
             };
 
             const calcularDiasCubiertosPorAhorro = (gasto) => {
-                const costoDiaBase = (gasto.montoTotal || 0) / diasLaboralesEnCiclo(gasto);
+                const totalDias = diasLaboralesEnCiclo(gasto);
+                const costoDiaBase = (gasto.montoTotal || 0) / (totalDias || 1);
                 if (costoDiaBase <= 0 || (gasto.ahorrado || 0) <= 0) return 0;
                 return Math.floor(gasto.ahorrado / costoDiaBase);
             };
@@ -174,16 +187,6 @@
                     intentos++;
                 }
                 return false;
-            };
-
-            const obtenerDiasLaboralesEntre = (inicio, fin) => {
-                let count = 0;
-                let temp = new Date(inicio);
-                while (temp < fin) {
-                    if (!state.descansos.includes(aStringFecha(temp))) count++;
-                    temp.setDate(temp.getDate() + 1);
-                }
-                return Math.max(0, count);
             };
 
             const guardar = () => localStorage.setItem(APP_ID, JSON.stringify({ gastos: state.gastos, descansos: state.descansos }));
@@ -325,8 +328,6 @@
                 const cubiertos = calcularDiasCubiertosPorAhorro(g);
                 const hoy = normalizarFecha(new Date());
                 const diasParaPago = prox ? Math.max(0, Math.ceil((prox - hoy) / 86400000)) : 0;
-                const totalDias = diasLaboralesEnCiclo(g);
-                const faltantes = Math.max(0, totalDias - cubiertos);
                 const prog = Math.min(100, (g.ahorrado / g.montoTotal) * 100);
                 const montoPendiente = Math.max(0, g.montoTotal - (g.ahorrado || 0));
                 
@@ -363,12 +364,12 @@
                         ${!pagadoEsteCiclo ? `
                             <div class="grid grid-cols-2 gap-3 mb-4">
                                 <div class="bg-indigo-50/50 p-3 rounded-2xl border border-indigo-100/30">
-                                    <p class="text-[8px] font-black text-indigo-400 uppercase">Cubiertos</p>
-                                    <p class="text-xs font-black text-indigo-700">${cubiertos} días</p>
+                                    <p class="text-[8px] font-black text-indigo-400 uppercase">Días Cubiertos</p>
+                                    <p class="text-xs font-black text-indigo-700">${cubiertos}</p>
                                 </div>
                                 <div class="bg-emerald-50/50 p-3 rounded-2xl border border-emerald-100/30 text-right">
-                                    <p class="text-[8px] font-black text-emerald-400 uppercase">Faltantes</p>
-                                    <p class="text-xs font-black text-emerald-700">${faltantes} días</p>
+                                    <p class="text-[8px] font-black text-emerald-400 uppercase">Días Restantes</p>
+                                    <p class="text-xs font-black text-emerald-700">${obtenerDiasLaboralesEntre(hoy, prox)}</p>
                                 </div>
                             </div>
 
@@ -619,7 +620,10 @@
                 let modalHTML = '';
                 if (state.calendarioGastoActivo) {
                     const g = state.calendarioGastoActivo;
-                    const cubiertos = calcularDiasCubiertosPorAhorro(g);
+                    const totalDiasCiclo = diasLaboralesEnCiclo(g);
+                    const cuotaBase = g.montoTotal / (totalDiasCiclo || 1);
+                    const cubiertos = Math.floor((g.ahorrado || 0) / (cuotaBase || 1));
+                    
                     const proxPago = obtenerVencimientoCercano(g);
                     const inicioCiclo = obtenerInicioCicloActual(g);
                     const año = state.mesCalendario.getFullYear();
@@ -630,7 +634,6 @@
                     
                     if (cubiertos > 0 && inicioCiclo) {
                         let temp = new Date(inicioCiclo);
-                        temp.setDate(temp.getDate() + 1);
                         let aportesCubiertos = 0;
                         let limitador = 0;
                         while (aportesCubiertos < cubiertos && limitador < 365) { 
@@ -724,9 +727,7 @@
 
             const toast = (m) => { state.notificacion = m; render(); setTimeout(() => { state.notificacion = null; render(); }, 2000); };
 
-            // Nuevas funciones de control para el menú
             window.togForm = () => setState({ mostrarFormulario: !state.mostrarFormulario });
-
             window.nav = (v) => setState({ vista: v, fechaSeleccionadaStr: null });
             window.diaDetalle = (f) => setState({ fechaSeleccionadaStr: f });
             window.cerrarDetalles = () => {
@@ -779,7 +780,7 @@
 
             window.marcarPagado = (id, fechaActualStr) => {
                 const f = new Date(fechaActualStr + "T00:00:00");
-                const idCiclo = `${f.getFullYear()}-${f.getMonth()}`;
+                const idCiclo = `${f.getFullYear()}-${f.getMonth()}-${f.getDate()}`;
                 const nuevosGastos = state.gastos.map(g => {
                     if (g.id === id) {
                         const historial = g.historialPagos || [];
